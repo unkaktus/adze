@@ -51,27 +51,28 @@ func PtyHandler(s ssh.Session) {
 	cmd := exec.Command(os.Getenv("SHELL"), "-l")
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	ptyReq, winCh, isPty := s.Pty()
-	if isPty {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
-		f, err := pty.Start(cmd)
-		if err != nil {
-			panic(err)
-		}
-		go func() {
-			for win := range winCh {
-				setWinsize(f, win.Width, win.Height)
-			}
-		}()
-		go func() {
-			io.Copy(f, s) // stdin
-		}()
-		io.Copy(s, f) // stdout
-		cmd.Wait()
-	} else {
+	if !isPty {
 		io.WriteString(s, "No PTY requested.\n")
-		s.Exit(1)
+		<-s.Context().Done()
+		return
 	}
+	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
+	f, err := pty.Start(cmd)
+	if err != nil {
+		panic(err)
+	}
+	go func() {
+		for win := range winCh {
+			setWinsize(f, win.Width, win.Height)
+		}
+	}()
+	go func() {
+		io.Copy(f, s) // stdin
+	}()
+	io.Copy(s, f) // stdout
+	cmd.Wait()
 }
+
 func PublicKeyHandler(ctx ssh.Context, key ssh.PublicKey) bool {
 	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".ssh/authorized_keys"))
 	if err != nil {
