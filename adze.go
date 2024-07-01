@@ -48,28 +48,39 @@ func SftpHandler(sess ssh.Session) {
 }
 
 func PtyHandler(s ssh.Session) {
-	cmd := exec.Command(os.Getenv("SHELL"), "-l")
+	args := []string{"-l"}
+	if len(s.Command()) > 0 {
+		userCommand := strings.Join(s.Command(), " ")
+		args = append(args, []string{"-c", userCommand}...)
+	}
+	cmd := exec.Command(os.Getenv("SHELL"), args...)
 	cmd.Env = append(cmd.Env, os.Environ()...)
 	ptyReq, winCh, isPty := s.Pty()
-	if !isPty {
-		io.WriteString(s, "No PTY requested.\n")
-		<-s.Context().Done()
-		return
-	}
-	cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
-	f, err := pty.Start(cmd)
-	if err != nil {
-		panic(err)
-	}
-	go func() {
-		for win := range winCh {
-			setWinsize(f, win.Width, win.Height)
+	if isPty {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
+		ptyFile, err := pty.Start(cmd)
+		if err != nil {
+			panic(err)
 		}
-	}()
-	go func() {
-		io.Copy(f, s) // stdin
-	}()
-	io.Copy(s, f) // stdout
+		go func() {
+			for win := range winCh {
+				setWinsize(ptyFile, win.Width, win.Height)
+			}
+		}()
+		go func() {
+			io.Copy(ptyFile, s) // stdin
+		}()
+		io.Copy(s, ptyFile) // stdout
+	} else {
+		cmd.Stdin = s
+		cmd.Stdout = s
+		cmd.Stderr = s.Stderr()
+		err := cmd.Start()
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	cmd.Wait()
 }
 
@@ -92,12 +103,23 @@ func PublicKeyHandler(ctx ssh.Context, key ssh.PublicKey) bool {
 func run() error {
 	portFlag := flag.Int("p", 2222, "listening port")
 	flag.Parse()
+
+	forwardHandler := &ssh.ForwardedTCPHandler{}
+
 	sshServer := ssh.Server{
 		Addr:             "127.0.0.1:" + strconv.Itoa(*portFlag),
 		Handler:          PtyHandler,
 		PublicKeyHandler: PublicKeyHandler,
 		SubsystemHandlers: map[string]ssh.SubsystemHandler{
 			"sftp": SftpHandler,
+		},
+		RequestHandlers: map[string]ssh.RequestHandler{
+			"tcpip-forward":        forwardHandler.HandleSSHRequest,
+			"cancel-tcpip-forward": forwardHandler.HandleSSHRequest,
+		},
+		ChannelHandlers: map[string]ssh.ChannelHandler{
+			"direct-tcpip": ssh.DirectTCPIPHandler,
+			"session":      ssh.DefaultSessionHandler,
 		},
 	}
 
